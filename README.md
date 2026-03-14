@@ -1,5 +1,5 @@
 # Station_meteo
-'''mermaid
+```mermaid
 flowchart TD
 
 START([DEBUT]) --> MODESTD[Mode standard]
@@ -87,3 +87,5 @@ ECOINTERVAL --> ECOGPS[GPS mesure 1 fois sur 2]
 ECOGPS --> ECOACQ[Capturer les donnees]
 
 ECOACQ --> ERRDATA
+
+```
