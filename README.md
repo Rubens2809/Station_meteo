@@ -1,4 +1,5 @@
 # Station_meteo
+'''mermaid
 flowchart TD
 
 START([DEBUT]) --> MODESTD[Mode standard]
