@@ -125,3 +125,34 @@ flowchart TD
     O --> P
     P --> Z[Fin cycle]
 ```
+```mermaid
+   flowchart TD
+
+   A[Mode Configuration] --> B[LED mode : jaune]
+
+   B --> C[Verifier erreurs systeme]
+   C --> D[Couleur LED erreur si necessaire]
+
+   D --> E[Lire commande utilisateur dans la console]
+
+   E --> F{Commande valide ?}
+
+   F -- Non --> G[Attendre nouvelle commande]
+
+   F -- Oui --> H[Mettre a jour parametre systeme]
+
+   H --> I{Commande RESET ?}
+
+   I -- Oui --> J[Restaurer valeurs par defaut]
+
+   I -- Non --> K[Appliquer nouveau parametre]
+
+   J --> L[Retour attente console]
+   K --> L
+
+   L --> M{Temps d inactivite depasse ?}
+
+   M -- Non --> E
+   M -- Oui --> N[Retour au mode Standard]
+```
+
