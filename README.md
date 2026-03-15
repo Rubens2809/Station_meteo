@@ -19,3 +19,42 @@ G -- Bouton rouge 5 s --> H[Retour mode precedent]
 
 D -- Inactivite depassee --> E
 ```
+
+```mermaid
+flowchart TD
+    A[Mode Standard] --> B[Couleur LED mode : verte]
+    B --> C[Verifier erreurs]
+    C --> D[Couleur LED erreur si besoin]
+    D --> E{LOG_INTERVAL ecoule ?}
+
+    E -- Non --> Z[Fin cycle]
+    E -- Oui --> F[Capturer mesures actives]
+
+    F --> G{TEMP_AIR active ?}
+    G -- Oui --> G1[Capter temperature air]
+    G -- Non --> H
+
+    G1 --> H{PRESSURE active ?}
+    H -- Oui --> H1[Capter pression]
+    H -- Non --> I
+
+    H1 --> I{HYGR active et temperature valide ?}
+    I -- Oui --> I1[Capter humidite]
+    I -- Non --> J
+
+    I1 --> J{LUMIN active ?}
+    J -- Oui --> J1[Capter luminosite]
+    J -- Non --> K
+
+    J1 --> K[Verifier timeout reception]
+    K --> L[Mettre NA si donnees absentes]
+    L --> M[Ajouter date]
+    M --> N{GPS actif ?}
+    N -- Oui --> N1[Ajouter latitude et longitude]
+    N -- Non --> O[Passer localisation]
+
+    N1 --> P[Stocker donnees + heure + localisation sur SD]
+    O --> P
+    P --> Z[Fin cycle]
+```
+    
