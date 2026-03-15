@@ -1,0 +1,623 @@
+#include <Arduino.h>
+#include <Wire.h>
+#include <ChainableLED.h>
+#include "rgb_lcd.h"
+#include "DHT.h"
+#include "RTClib.h"
+#include <MicroNMEA.h>
+#include <SoftwareSerial.h>
+#include <EEPROM.h>
+#include <string.h>
+#include <avr/pgmspace.h>
+#include <SPI.h>
+#include <SdFat.h>
+
+// ---------Materiel----------------------
+
+#define LED_PIN 6
+#define CLK_PIN 7
+#define NUM_LEDS 1
+#define SD_CS 10
+#define DHTPIN 4
+#define DHTTYPE DHT11
+#define BTN_ROUGE 2
+#define BTN_VERT 3
+#define PIN_LUMIN A1
+
+SoftwareSerial ss(8, 9); // Utilisez les pins de votre choix (ex: RX=8, TX=9)
+static const uint32_t GPSBaud = 9600;
+
+// -------------Objets----------------------
+
+ChainableLED leds(LED_PIN, CLK_PIN, NUM_LEDS);
+rgb_lcd lcd;
+RTC_DS1307 rtc;
+DHT dht(DHTPIN, DHTTYPE);
+SdFat32 sd;
+
+
+char nmeaBuffer[35];
+MicroNMEA gps(nmeaBuffer, sizeof(nmeaBuffer));
+
+//--------------Modes---------------------------
+
+enum Mode : uint8_t { MODE_STANDARD, MODE_CONFIGURATION, MODE_ECONOMIQUE, MODE_MAINTENANCE, MODE_OFF };
+enum TypeErreur : uint8_t { ERR_RTC, ERR_GPS, ERR_CAPTEUR, ERR_INCOHERENTE, ERR_SD_PLEINE, ERR_SD, ERR_AUCUNE };
+
+struct Config {
+  uint16_t magic;
+  uint8_t LOG_INTERVALL;
+  uint16_t FILE_MAX_SIZE;
+  uint8_t TIMEOUT;
+  uint8_t LUMIN;
+  uint16_t LUMIN_LOW;
+  uint16_t LUMIN_HIGH;
+  uint8_t TEMP_AIR;
+  int8_t MIN_TEMP_AIR;
+  int8_t MAX_TEMP_AIR;
+  uint8_t HYGR;
+  int8_t HYGR_MINT;
+  int8_t HYGR_MAXT;
+  uint8_t PRESSURE;
+  uint16_t PRESSURE_MIN;
+  uint16_t PRESSURE_MAX;
+};
+
+const uint16_t CONFIG_MAGIC = 0xBEEF;
+const int EEPROM_ADDR = 0;
+const Config defaultConfig PROGMEM = { CONFIG_MAGIC, 600, 2048, 30, 1, 255, 768, 1, -10, 60, 1, 0, 50, 1, 850, 1080, };
+
+// Noms des paramètres en Flash
+const char p0[] PROGMEM = "LOG_INTERVALL"; const char p1[] PROGMEM = "FILE_MAX_SIZE";
+const char p2[] PROGMEM = "TIMEOUT";       const char p3[] PROGMEM = "LUMIN";
+const char p4[] PROGMEM = "LUMIN_LOW";     const char p5[] PROGMEM = "LUMIN_HIGH";
+const char p6[] PROGMEM = "TEMP_AIR";      const char p7[] PROGMEM = "MIN_TEMP_AIR";
+const char p8[] PROGMEM = "MAX_TEMP_AIR";  const char p9[] PROGMEM = "HYGR";
+const char p10[] PROGMEM = "HYGR_MINT";    const char p11[] PROGMEM = "HYGR_MAXT";
+const char p12[] PROGMEM = "PRESSURE";     const char p13[] PROGMEM = "PRESSURE_MIN";
+const char p14[] PROGMEM = "PRESSURE_MAX";
+
+const char* const paramNames[] PROGMEM = { p0, p1, p2, p3, p4, p5, p6, p7, p8, p9, p10, p11, p12, p13, p14, };
+
+struct ParamDef { uint8_t offset; int16_t minVal; int16_t maxVal; };
+const ParamDef paramTable[] PROGMEM = {
+  {offsetof(Config, LOG_INTERVALL), 1, 1440}, {offsetof(Config, FILE_MAX_SIZE), 128, 32767},
+  {offsetof(Config, TIMEOUT), 1, 3600},       {offsetof(Config, LUMIN), 0, 1},
+  {offsetof(Config, LUMIN_LOW), 0, 1023},     {offsetof(Config, LUMIN_HIGH), 0, 1023},
+  {offsetof(Config, TEMP_AIR), 0, 1},         {offsetof(Config, MIN_TEMP_AIR), -40, 85},
+  {offsetof(Config, MAX_TEMP_AIR), -40, 85},  {offsetof(Config, HYGR), 0, 1},
+  {offsetof(Config, HYGR_MINT), -40, 85},     {offsetof(Config, HYGR_MAXT), -40, 85},
+  {offsetof(Config, PRESSURE), 0, 1},         {offsetof(Config, PRESSURE_MIN), 300, 1100},
+  {offsetof(Config, PRESSURE_MAX), 300, 1100}
+};
+
+const uint8_t paramCount = sizeof(paramTable) / sizeof(paramTable[0]);
+
+
+//--------------Variables------------------
+
+Config config;
+Mode mode_actif = MODE_OFF;
+Mode mode_precedent = MODE_STANDARD;
+volatile bool boutonRougeAppuye = false;
+volatile bool boutonVertAppuye = false;
+volatile unsigned long debutAppuiRouge = 0;
+volatile unsigned long debutAppuiVert = 0;
+bool rougeDejaTraite = false, vertDejaTraite = false, erreur = false;
+TypeErreur type_erreur = ERR_AUCUNE;
+float t = NAN, h = NAN;
+int tauxLuminosite = 0, valeurBrute = 0;
+unsigned long dernierSuccesDHT = 0, derniereLectureCapteurs = 0, dernierGPSRecu = 0, precedentLED = 0;
+unsigned long derniereInteraction = 0;
+uint8_t counter_NA = 0;
+bool etatLED = false;
+DateTime now;
+uint8_t t_inactivite = 30;
+char cmdBuffer[12];
+
+
+//---------------EEPROM-------------
+
+int16_t fast_atoi(const char* s) {
+  int16_t r = 0;
+  bool neg = (*s == '-');
+  if (neg) s++;
+  while (*s >= '0' && *s <= '9') r = r * 10 + (*s++ - '0');
+  return neg ? -r : r;
+}
+
+void readParamName(uint8_t index, char* buffer, size_t bufferSize) {
+  const char* ptr = (const char*)pgm_read_ptr(&paramNames[index]);
+  strncpy_P(buffer, ptr, bufferSize);
+  buffer[bufferSize - 1] = '\0';
+}
+
+void saveConfig() {
+  EEPROM.put(EEPROM_ADDR, config);
+}
+
+void loadConfig() {
+  EEPROM.get(EEPROM_ADDR, config);
+  if (config.magic != CONFIG_MAGIC) {
+    memcpy_P(&config, &defaultConfig, sizeof(Config));
+    saveConfig();
+  }
+}
+
+
+
+// =====================================================
+// OUTILS CONFIG
+// =====================================================
+
+void readParamDef(uint8_t index, ParamDef& p) {
+  memcpy_P(&p, &paramTable[index], sizeof(ParamDef));
+}
+
+int16_t lireValeurParam(uint8_t index) {
+  ParamDef p;
+  readParamDef(index, p);
+
+  uint8_t* base = (uint8_t*)&config;
+
+  if (index == 3 || index == 6 || index == 9 || index == 12) {
+    return *(uint8_t*)(base + p.offset);
+  }
+
+  if (index == 7 || index == 8 || index == 10 || index == 11) {
+    return *(int8_t*)(base + p.offset);
+  }
+
+  return *(uint16_t*)(base + p.offset);
+}
+
+
+void ecrireValeurParam(uint8_t index, int16_t value) {
+  ParamDef p;
+  readParamDef(index, p);
+
+  uint8_t* base = (uint8_t*)&config;
+
+  if (index == 3 || index == 6 || index == 9 || index == 12) {
+    *(uint8_t*)(base + p.offset) = (uint8_t)value;
+    return;
+  }
+
+  if (index == 7 || index == 8 || index == 10 || index == 11) {
+    *(int8_t*)(base + p.offset) = (int8_t)value;
+    return;
+  }
+
+  *(uint16_t*)(base + p.offset) = (uint16_t)value;
+}
+
+
+
+int8_t findParamIndex(const char* name) {
+  char buffer[20];
+
+  for (uint8_t i = 0; i < paramCount; i++) {
+    readParamName(i, buffer, sizeof(buffer));
+    if (strcmp(name, buffer) == 0) {
+      return i;
+    }
+  }
+  return -1;
+}
+
+
+
+bool setParameter(const char* name, int16_t value) {
+  int8_t index = findParamIndex(name);
+  if (index < 0) return false;
+
+  ParamDef p;
+  readParamDef(index, p);
+
+  if (value < p.minVal || value > p.maxVal) return false;
+
+  ecrireValeurParam(index, value);
+  saveConfig();
+  return true;
+}
+
+
+//----------------Erreurs-------------------------
+
+
+void reset_erreurs() { erreur = false; type_erreur = ERR_AUCUNE; }
+void setErreur(TypeErreur e) { erreur = true; type_erreur = e; }
+
+void erreur_capteur() {
+  if (config.TEMP_AIR && (t < config.MIN_TEMP_AIR || t > config.MAX_TEMP_AIR)) setErreur(ERR_CAPTEUR);
+  if (config.HYGR && (t < config.HYGR_MINT || t > config.HYGR_MAXT)) setErreur(ERR_CAPTEUR);
+  if (counter_NA >= 2) setErreur(ERR_CAPTEUR);
+  if (config.LUMIN && (valeurBrute < 0 || valeurBrute > 1023)) setErreur(ERR_CAPTEUR);
+}
+
+//--------------Systèmes----------------------------
+
+void ADHT() {
+  float nh = dht.readHumidity(), nt = dht.readTemperature();
+  if (!isnan(nh) && !isnan(nt)) { h = nh; t = nt; dernierSuccesDHT = millis(); counter_NA = 0; }
+  if (millis() - dernierSuccesDHT > ((unsigned long)config.TIMEOUT * 1000UL)) {if (counter_NA<3) {counter_NA++ ;} t = NAN; h = NAN; }
+}
+
+void Luminosite() {
+  valeurBrute = analogRead(PIN_LUMIN);
+  tauxLuminosite = constrain(map(valeurBrute, config.LUMIN_LOW, config.LUMIN_HIGH, 0, 100), 0, 100);
+}
+
+void lireGPS() {
+  bool dr = false;
+  while (ss.available() > 0) { gps.process(ss.read()); dr = true; }
+  if (dr) dernierGPSRecu = millis();
+  if (millis() - dernierGPSRecu > 3000UL) setErreur(ERR_GPS);
+}
+
+void Date_Heure() {
+  Wire.beginTransmission(0x68);
+  if (Wire.endTransmission() != 0) setErreur(ERR_RTC);
+  else now = rtc.now();
+}
+
+// =====================================================
+// COMMANDES SERIE
+// =====================================================
+
+
+//----------Config Horloge GPS----------------
+
+bool parseClock(const char* s, uint8_t& hh, uint8_t& mm, uint8_t& ss_) {
+    char* next;
+    hh = (uint8_t)strtol(s, &next, 10);
+    if (*next != ':') return false;
+    mm = (uint8_t)strtol(next + 1, &next, 10);
+    if (*next != ':') return false;
+    ss_ = (uint8_t)strtol(next + 1, NULL, 10);
+    return (hh < 24 && mm < 60 && ss_ < 60);
+}
+
+bool parseDate(const char* s, uint8_t& month, uint8_t& day, uint16_t& year) {
+    char* next;
+    month = (uint8_t)strtol(s, &next, 10);
+    if (*next != ':') return false;
+    day = (uint8_t)strtol(next + 1, &next, 10);
+    if (*next != ':') return false;
+    year = (uint16_t)strtol(next + 1, NULL, 10);
+    return (month >= 1 && month <= 12 && day >= 1 && day <= 31 && year >= 2000);
+}
+
+//----------Lecture commande------------
+
+void resetInactivite() {
+    derniereInteraction = millis();
+}
+
+void lectureCommande() {
+  if (!Serial.available()) return;
+  resetInactivite();
+
+  size_t len = Serial.readBytesUntil('\n', cmdBuffer, sizeof(cmdBuffer) - 1);
+  cmdBuffer[len] = '\0';
+
+  if (len == 0) return;
+
+  while (len > 0 && (cmdBuffer[len - 1] == '\r' || cmdBuffer[len - 1] == ' ')) {
+    cmdBuffer[len - 1] = '\0';
+    len--;
+  }
+
+ if (strcmp(cmdBuffer, "RESET") == 0) {
+  memcpy_P(&config, &defaultConfig, sizeof(Config));
+  saveConfig();
+  return;
+}
+
+  char* egal = strchr(cmdBuffer, '=');
+  if (!egal) {
+    return;
+  }
+
+  *egal = '\0';
+  char* name = cmdBuffer;
+  char* value = egal + 1;
+
+  if (strcmp(name, "CLOCK") == 0) {
+    uint8_t hh, mm, ss_;
+    if (!parseClock(value, hh, mm, ss_)) {
+      return;
+    }
+
+    DateTime rtcNow = rtc.now();
+    rtc.adjust(DateTime(rtcNow.year(), rtcNow.month(), rtcNow.day(), hh, mm, ss_));
+    return;
+  }
+
+  if (strcmp(name, "DATE") == 0) {
+    uint8_t month, day;
+    uint16_t year;
+
+    if (!parseDate(value, month, day, year)) {
+      return;
+    }
+
+    DateTime rtcNow = rtc.now();
+    rtc.adjust(DateTime(year, month, day, rtcNow.hour(), rtcNow.minute(), rtcNow.second()));
+    return;
+  }
+
+  if (strcmp(name, "DAY") == 0) {
+    if (strcmp(value, "MON") == 0 || strcmp(value, "TUE") == 0 ||
+        strcmp(value, "WED") == 0 || strcmp(value, "THU") == 0 ||
+        strcmp(value, "FRI") == 0 || strcmp(value, "SAT") == 0 ||
+        strcmp(value, "SUN") == 0) {
+    }
+    return;
+  }
+
+  int16_t intValue = fast_atoi(value);
+
+  if (setParameter(name, intValue)) {
+  }
+}
+
+
+// =====================================================
+// AFFICHAGE
+// =====================================================
+
+void affichage() {
+  lcd.clear();
+
+  lcd.setCursor(0, 0);
+  if (t == t) { 
+    lcd.print((int)t);
+    lcd.print('C');
+  } else {
+    lcd.print(F("NA"));
+  }
+
+  if (h == h) {
+    lcd.print((int)h);
+    lcd.print('%');
+  } else {
+    lcd.print(F("H:NA"));
+  }
+
+  lcd.setCursor(0, 1);
+  lcd.print(F("L:"));
+  lcd.print(tauxLuminosite);
+  lcd.print(F("% "));
+  if (gps.isValid()) lcd.print(F("GPS"));
+  else lcd.print(F("NoGPS"));
+}
+
+
+// BOUTONS & LED
+
+void btn_rouge() { if (digitalRead(BTN_ROUGE) == LOW) { if (!boutonRougeAppuye) { boutonRougeAppuye = true; debutAppuiRouge = millis(); } } else boutonRougeAppuye = false; }
+void btn_vert() { if (digitalRead(BTN_VERT) == LOW) { if (!boutonVertAppuye) { boutonVertAppuye = true; debutAppuiVert = millis(); } } else boutonVertAppuye = false; }
+
+void changement_modes() {
+  noInterrupts();
+  bool rA = boutonRougeAppuye, vA = boutonVertAppuye;
+  unsigned long tR = debutAppuiRouge, tV = debutAppuiVert;
+  interrupts();
+
+  if (rA || vA) {
+    resetInactivite();
+  }
+
+  if (rA && !rougeDejaTraite && (millis() - tR >= 5000UL)) {
+    rougeDejaTraite = true;
+    if (mode_actif == MODE_MAINTENANCE) mode_actif = mode_precedent;
+    else { mode_precedent = mode_actif; mode_actif = MODE_MAINTENANCE; }
+  } else if (!rA) rougeDejaTraite = false;
+
+  if (vA && !vertDejaTraite && (millis() - tV >= 5000UL)) {
+    vertDejaTraite = true;
+    if (mode_actif == MODE_STANDARD) { mode_precedent = MODE_STANDARD; mode_actif = MODE_ECONOMIQUE; }
+    else if (mode_actif == MODE_ECONOMIQUE) { mode_precedent = MODE_ECONOMIQUE; mode_actif = MODE_STANDARD; }
+  } else if (!vA) vertDejaTraite = false;
+
+}
+
+void verif_inactivite() {
+  if (mode_actif == MODE_CONFIGURATION) {
+        if (millis() - derniereInteraction >= t_inactivite*1000UL) {
+            mode_actif = MODE_STANDARD;
+            lcd.clear();
+        }
+    }
+}
+
+void couleur_erreur() {
+  if (!erreur) return;
+
+  unsigned long m = millis();
+  uint16_t d2 = (type_erreur == ERR_INCOHERENTE || type_erreur == ERR_SD) ? 1000 : 500;
+  unsigned long d = etatLED ? d2 : 500;
+
+  if (m - precedentLED >= d) {
+    precedentLED = m;
+    etatLED = !etatLED;
+
+    if (!etatLED) {
+      leds.setColorRGB(0, 255, 0, 0); // r1, g1, b1 est TOUJOURS Rouge (255,0,0) selon ton code
+    } else {
+      // Switch direct pour r2, g2, b2 sans variables intermédiaires
+      switch (type_erreur) {
+        case ERR_RTC:         leds.setColorRGB(0, 0, 0, 255);   break; // Bleu
+        case ERR_GPS:         leds.setColorRGB(0, 255, 255, 0); break; // Jaune
+        case ERR_CAPTEUR:     leds.setColorRGB(0, 0, 255, 0);   break; // Vert
+        case ERR_INCOHERENTE: leds.setColorRGB(0, 0, 255, 0);   break; // Vert (long)
+        case ERR_SD_PLEINE:   leds.setColorRGB(0, 255, 255, 255); break; // Blanc
+        case ERR_SD:          leds.setColorRGB(0, 255, 255, 255); break; // Blanc (long)
+        default:              leds.setColorRGB(0, 0, 0, 0);     break;
+      }
+    }
+  }
+}
+
+void couleur_modes() {
+  if (erreur) return;
+  switch (mode_actif) {
+    case MODE_STANDARD: leds.setColorRGB(0, 0, 255, 0); break;
+    case MODE_CONFIGURATION: leds.setColorRGB(0, 255, 200, 0); break;
+    case MODE_ECONOMIQUE: leds.setColorRGB(0, 0, 0, 255); break;
+    case MODE_MAINTENANCE: leds.setColorRGB(0, 255, 25, 0); break;
+    default: leds.setColorRGB(0, 0, 0, 0); break;
+  }
+}
+
+
+//----SD & ARCHIVAGE ---------------
+
+
+void construireNom(char* buf, uint8_t r) {
+  uint8_t y = now.year() % 100;
+  uint8_t m = now.month();
+  uint8_t d = now.day();
+  buf[0] = (y / 10) + '0'; buf[1] = (y % 10) + '0';
+  buf[2] = (m / 10) + '0'; buf[3] = (m % 10) + '0';
+  buf[4] = (d / 10) + '0'; buf[5] = (d % 10) + '0';
+  buf[6] = '_';
+  if (r < 10) {
+    buf[7] = r + '0';
+    strcpy_P(buf + 8, PSTR(".LOG"));
+  } else {
+    buf[7] = (r / 10) + '0';
+    buf[8] = (r % 10) + '0';
+    strcpy_P(buf + 9, PSTR(".LOG"));
+  }
+}
+
+bool verifierRotationFichier(const char* filename) {
+  File32 f;
+  if (f.open(filename, O_RDONLY)) {
+    uint32_t s = f.size();
+    f.close();
+    if (s >= config.FILE_MAX_SIZE) {
+      char archiveName[13];
+      for (uint8_t r = 1; r < 100; r++) {
+        construireNom(archiveName, r);
+        if (!sd.exists(archiveName)) {
+          return sd.rename(filename, archiveName);
+        }
+      }
+    }
+  }
+  return true;
+}
+
+void enregistrerDonnees(float temp, float hum, int lum, float lat, float lon) {
+  char filename[13];
+  construireNom(filename, 0);
+
+  if (!verifierRotationFichier(filename)) return;
+  File32 dataFile;
+
+  if (dataFile.open(filename, O_WRONLY | O_CREAT | O_AT_END)) {
+    // Ecriture manuelle pour éviter le formatage float de SdFat
+    dataFile.write((uint8_t)(now.day() / 10) + '0');
+    dataFile.write((uint8_t)(now.day() % 10) + '0');
+    dataFile.write('/');
+    dataFile.write((uint8_t)(now.month() / 10) + '0');
+    dataFile.write((uint8_t)(now.month() % 10) + '0');
+    dataFile.write(' ');
+   
+    // Pour la température (conversion simple en entier)
+    if (temp != temp) { // Test NaN
+       dataFile.write('N'); dataFile.write('A');
+    } else {
+       dataFile.print((int)temp); // Print entier est plus léger que float
+    }
+    dataFile.write(',');
+    dataFile.print(lum);
+    dataFile.write('\r'); dataFile.write('\n');
+    dataFile.close();
+  }
+}
+
+// =====================================================
+// MODES DE FONCTIONNEMENT
+// =====================================================
+
+void acquisition(bool avecLuminosite, bool avecAffichage, bool avecEnregistrement) {
+  unsigned long m = millis();
+  if (m - derniereLectureCapteurs >= ((unsigned long)config.LOG_INTERVALL * 1000UL)) {
+    derniereLectureCapteurs = m;
+    reset_erreurs(); ADHT(); Date_Heure();
+    if (avecLuminosite && config.LUMIN) Luminosite();
+    lireGPS(); erreur_capteur();
+
+    if (avecEnregistrement) {
+      float la = gps.isValid() ? gps.getLatitude() / 1000000.0 : 0.0;
+      float lo = gps.isValid() ? gps.getLongitude() / 1000000.0 : 0.0;
+      enregistrerDonnees(t, h, tauxLuminosite, la, lo);
+    }
+    if (avecAffichage) {
+      affichage();
+    }
+  }
+}
+
+// =====================================================
+// SETUP & LOOP
+// =====================================================
+
+void setup() {
+  Serial.begin(9600);
+  pinMode(BTN_ROUGE, INPUT_PULLUP);
+  pinMode(BTN_VERT, INPUT_PULLUP);
+  pinMode(SD_CS, OUTPUT);
+  digitalWrite(SD_CS, HIGH);
+
+  Wire.begin(); rtc.begin(); dht.begin(); ss.begin(GPSBaud);
+  lcd.begin(16, 2);
+  loadConfig();
+
+  mode_actif = (digitalRead(BTN_ROUGE) == LOW) ? MODE_CONFIGURATION : MODE_STANDARD;
+
+  attachInterrupt(digitalPinToInterrupt(BTN_ROUGE), btn_rouge, CHANGE);
+  attachInterrupt(digitalPinToInterrupt(BTN_VERT), btn_vert, CHANGE);
+
+  sd.begin(SD_CS, SPI_HALF_SPEED); // On ne teste plus le retour true/false
+
+  if (!rtc.isrunning()) rtc.adjust(DateTime(F(__DATE__), F(__TIME__)));
+
+  dernierGPSRecu = millis();
+  dernierSuccesDHT = millis();
+}
+
+void standard() {
+  acquisition(true, false, true);
+}
+
+void economique() {
+  acquisition(false, false, true);
+}
+
+void maintenance() {
+  acquisition(true, true, false);
+}
+
+void configuration() {
+  lectureCommande();
+  verif_inactivite();
+}
+
+void loop() {
+
+  switch (mode_actif) {
+    case MODE_STANDARD: standard(); break;
+    case MODE_ECONOMIQUE: economique(); break;
+    case MODE_MAINTENANCE: maintenance(); break;
+    case MODE_CONFIGURATION: ; configuration(); break;
+    default: break;
+  }
+  changement_modes();
+  if (erreur) { couleur_erreur(); }
+  else couleur_modes();
+}
