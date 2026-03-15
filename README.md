@@ -15,3 +15,4 @@ Diagram Mermaid
     G -- Bouton rouge 5 s --> H[Retour mode precedent]
 
     D -- Inactivite depassee --> E
+'''
