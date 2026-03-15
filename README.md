@@ -57,4 +57,33 @@ flowchart TD
     O --> P
     P --> Z[Fin cycle]
 ```
-    
+```mermaid
+flowchart TD
+ A[Mode Economique] --> B[Couleur LED mode : bleue]
+    B --> C[Verifier erreurs]
+    C --> D[Couleur LED erreur si besoin]
+    D --> E{2 x LOG_INTERVAL ecoule ?}
+
+    E -- Non --> Z[Fin cycle]
+    E -- Oui --> F[Capturer mesures reduites]
+
+    F --> G{TEMP_AIR active ?}
+    G -- Oui --> G1[Capter temperature air]
+    G -- Non --> H
+
+    G1 --> H{PRESSURE active ?}
+    H -- Oui --> H1[Capter pression]
+    H -- Non --> I
+
+    H1 --> I[GPS_ACTIF change d etat]
+    I --> J[Verifier timeout reception]
+    J --> K[Mettre NA si donnees absentes]
+    K --> L[Ajouter date]
+    L --> M{GPS actif ?}
+    M -- Oui --> M1[Ajouter latitude et longitude]
+    M -- Non --> N[Passer localisation]
+
+    M1 --> O[Stocker donnees + heure + localisation sur SD]
+    N --> O
+    O --> Z[Fin cycle]
+```
