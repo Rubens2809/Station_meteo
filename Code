@@ -10,9 +10,9 @@
 #include <string.h>
 #include <avr/pgmspace.h>
 #include <SPI.h>
-#include <SdFat.h>
+#include <SdFat.h> // Utilisation de SdFat pour le support de rename()
 
-// ---------Materiel----------------------
+//--------------------------Materiel------------------------
 
 #define LED_PIN 6
 #define CLK_PIN 7
@@ -24,10 +24,10 @@
 #define BTN_VERT 3
 #define PIN_LUMIN A1
 
-SoftwareSerial ss(8, 9); // Utilisez les pins de votre choix (ex: RX=8, TX=9)
+SoftwareSerial ss(8, 9); 
 static const uint32_t GPSBaud = 9600;
 
-// -------------Objets----------------------
+//---------------------Objets---------------------------------
 
 ChainableLED leds(LED_PIN, CLK_PIN, NUM_LEDS);
 rgb_lcd lcd;
@@ -39,7 +39,7 @@ SdFat32 sd;
 char nmeaBuffer[35];
 MicroNMEA gps(nmeaBuffer, sizeof(nmeaBuffer));
 
-//--------------Modes---------------------------
+//--------------------Types et Config----------------------------
 
 enum Mode : uint8_t { MODE_STANDARD, MODE_CONFIGURATION, MODE_ECONOMIQUE, MODE_MAINTENANCE, MODE_OFF };
 enum TypeErreur : uint8_t { ERR_RTC, ERR_GPS, ERR_CAPTEUR, ERR_INCOHERENTE, ERR_SD_PLEINE, ERR_SD, ERR_AUCUNE };
@@ -65,9 +65,8 @@ struct Config {
 
 const uint16_t CONFIG_MAGIC = 0xBEEF;
 const int EEPROM_ADDR = 0;
-const Config defaultConfig PROGMEM = { CONFIG_MAGIC, 600, 2048, 30, 1, 255, 768, 1, -10, 60, 1, 0, 50, 1, 850, 1080, };
+const Config defaultConfig PROGMEM = { CONFIG_MAGIC, 3, 4096, 1, 1, 255, 768, 1, -10, 60, 1, 0, 50, 1, 850, 1080, };
 
-// Noms des paramètres en Flash
 const char p0[] PROGMEM = "LOG_INTERVALL"; const char p1[] PROGMEM = "FILE_MAX_SIZE";
 const char p2[] PROGMEM = "TIMEOUT";       const char p3[] PROGMEM = "LUMIN";
 const char p4[] PROGMEM = "LUMIN_LOW";     const char p5[] PROGMEM = "LUMIN_HIGH";
@@ -93,8 +92,7 @@ const ParamDef paramTable[] PROGMEM = {
 
 const uint8_t paramCount = sizeof(paramTable) / sizeof(paramTable[0]);
 
-
-//--------------Variables------------------
+//--------------------Variables globales--------------------------------------
 
 Config config;
 Mode mode_actif = MODE_OFF;
@@ -115,8 +113,7 @@ DateTime now;
 uint8_t t_inactivite = 30;
 char cmdBuffer[12];
 
-
-//---------------EEPROM-------------
+//--------------Eeprom------------------
 
 int16_t fast_atoi(const char* s) {
   int16_t r = 0;
@@ -144,11 +141,7 @@ void loadConfig() {
   }
 }
 
-
-
-// =====================================================
-// OUTILS CONFIG
-// =====================================================
+//-------------------Outils config-----------------------
 
 void readParamDef(uint8_t index, ParamDef& p) {
   memcpy_P(&p, &paramTable[index], sizeof(ParamDef));
@@ -221,9 +214,7 @@ bool setParameter(const char* name, int16_t value) {
   return true;
 }
 
-
-//----------------Erreurs-------------------------
-
+//------------------------Erreurs et Capteurs-------------------------
 
 void reset_erreurs() { erreur = false; type_erreur = ERR_AUCUNE; }
 void setErreur(TypeErreur e) { erreur = true; type_erreur = e; }
@@ -234,8 +225,6 @@ void erreur_capteur() {
   if (counter_NA >= 2) setErreur(ERR_CAPTEUR);
   if (config.LUMIN && (valeurBrute < 0 || valeurBrute > 1023)) setErreur(ERR_CAPTEUR);
 }
-
-//--------------Systèmes----------------------------
 
 void ADHT() {
   float nh = dht.readHumidity(), nt = dht.readTemperature();
@@ -261,12 +250,7 @@ void Date_Heure() {
   else now = rtc.now();
 }
 
-// =====================================================
-// COMMANDES SERIE
-// =====================================================
-
-
-//----------Config Horloge GPS----------------
+//---------------------------Commande Serie------------------------------
 
 bool parseClock(const char* s, uint8_t& hh, uint8_t& mm, uint8_t& ss_) {
     char* next;
@@ -288,11 +272,7 @@ bool parseDate(const char* s, uint8_t& month, uint8_t& day, uint16_t& year) {
     return (month >= 1 && month <= 12 && day >= 1 && day <= 31 && year >= 2000);
 }
 
-//----------Lecture commande------------
 
-void resetInactivite() {
-    derniereInteraction = millis();
-}
 
 void lectureCommande() {
   if (!Serial.available()) return;
@@ -363,24 +343,24 @@ void lectureCommande() {
 }
 
 
-// =====================================================
-// AFFICHAGE
-// =====================================================
+//-------------------------Affichage-------------------------------
 
 void affichage() {
   lcd.clear();
 
   lcd.setCursor(0, 0);
-  if (t == t) { 
+  if (t == t) {
+    lcd.print("T:");
     lcd.print((int)t);
-    lcd.print('C');
+    lcd.print("C ");
   } else {
     lcd.print(F("NA"));
   }
 
   if (h == h) {
+    lcd.print("H:");
     lcd.print((int)h);
-    lcd.print('%');
+    lcd.print("%");
   } else {
     lcd.print(F("H:NA"));
   }
@@ -394,7 +374,7 @@ void affichage() {
 }
 
 
-// BOUTONS & LED
+//--------------------------------Changement de modes----------------------------------
 
 void btn_rouge() { if (digitalRead(BTN_ROUGE) == LOW) { if (!boutonRougeAppuye) { boutonRougeAppuye = true; debutAppuiRouge = millis(); } } else boutonRougeAppuye = false; }
 void btn_vert() { if (digitalRead(BTN_VERT) == LOW) { if (!boutonVertAppuye) { boutonVertAppuye = true; debutAppuiVert = millis(); } } else boutonVertAppuye = false; }
@@ -423,6 +403,10 @@ void changement_modes() {
 
 }
 
+void resetInactivite() {
+    derniereInteraction = millis();
+}
+
 void verif_inactivite() {
   if (mode_actif == MODE_CONFIGURATION) {
         if (millis() - derniereInteraction >= t_inactivite*1000UL) {
@@ -431,6 +415,8 @@ void verif_inactivite() {
         }
     }
 }
+
+//----------------------------LED--------------------------------
 
 void couleur_erreur() {
   if (!erreur) return;
@@ -444,16 +430,15 @@ void couleur_erreur() {
     etatLED = !etatLED;
 
     if (!etatLED) {
-      leds.setColorRGB(0, 255, 0, 0); // r1, g1, b1 est TOUJOURS Rouge (255,0,0) selon ton code
+      leds.setColorRGB(0, 255, 0, 0);
     } else {
-      // Switch direct pour r2, g2, b2 sans variables intermédiaires
       switch (type_erreur) {
-        case ERR_RTC:         leds.setColorRGB(0, 0, 0, 255);   break; // Bleu
-        case ERR_GPS:         leds.setColorRGB(0, 255, 255, 0); break; // Jaune
-        case ERR_CAPTEUR:     leds.setColorRGB(0, 0, 255, 0);   break; // Vert
-        case ERR_INCOHERENTE: leds.setColorRGB(0, 0, 255, 0);   break; // Vert (long)
-        case ERR_SD_PLEINE:   leds.setColorRGB(0, 255, 255, 255); break; // Blanc
-        case ERR_SD:          leds.setColorRGB(0, 255, 255, 255); break; // Blanc (long)
+        case ERR_RTC:         leds.setColorRGB(0, 0, 0, 255);   break;
+        case ERR_GPS:         leds.setColorRGB(0, 255, 255, 0); break;
+        case ERR_CAPTEUR:     leds.setColorRGB(0, 0, 255, 0);   break;
+        case ERR_INCOHERENTE: leds.setColorRGB(0, 0, 255, 0);   break;
+        case ERR_SD_PLEINE:   leds.setColorRGB(0, 255, 255, 255); break;
+        case ERR_SD:          leds.setColorRGB(0, 255, 255, 255); break;
         default:              leds.setColorRGB(0, 0, 0, 0);     break;
       }
     }
@@ -471,9 +456,37 @@ void couleur_modes() {
   }
 }
 
+//---------------------Enregistrement---------------------------------
 
-//----SD & ARCHIVAGE ---------------
+void enregistrerDonnees(float temp, float hum, int lum, float lat, float lon) {
+  char filename[13];
+  construireNom(filename, 0);
 
+  if (!verifierRotationFichier(filename)) return;
+  File32 dataFile;
+
+  if (dataFile.open(filename, O_WRONLY | O_CREAT | O_AT_END)) {
+    dataFile.write((uint8_t)(now.day() / 10) + '0');
+    dataFile.write((uint8_t)(now.day() % 10) + '0');
+    dataFile.write('/');
+    dataFile.write((uint8_t)(now.month() / 10) + '0');
+    dataFile.write((uint8_t)(now.month() % 10) + '0');
+    dataFile.write(' ');
+   
+    dataFile.print("T:");
+    if (temp != temp) { 
+       dataFile.write('N'); dataFile.write('A');
+    } else {
+       dataFile.print((int)temp);
+    }
+    dataFile.print(", H:");
+    dataFile.print(lum);
+    dataFile.write('\r'); dataFile.write('\n');
+    dataFile.close();
+  }
+}
+
+//---------------------------Archivage------------------------------------
 
 void construireNom(char* buf, uint8_t r) {
   uint8_t y = now.year() % 100;
@@ -511,38 +524,7 @@ bool verifierRotationFichier(const char* filename) {
   return true;
 }
 
-void enregistrerDonnees(float temp, float hum, int lum, float lat, float lon) {
-  char filename[13];
-  construireNom(filename, 0);
-
-  if (!verifierRotationFichier(filename)) return;
-  File32 dataFile;
-
-  if (dataFile.open(filename, O_WRONLY | O_CREAT | O_AT_END)) {
-    // Ecriture manuelle pour éviter le formatage float de SdFat
-    dataFile.write((uint8_t)(now.day() / 10) + '0');
-    dataFile.write((uint8_t)(now.day() % 10) + '0');
-    dataFile.write('/');
-    dataFile.write((uint8_t)(now.month() / 10) + '0');
-    dataFile.write((uint8_t)(now.month() % 10) + '0');
-    dataFile.write(' ');
-   
-    // Pour la température (conversion simple en entier)
-    if (temp != temp) { // Test NaN
-       dataFile.write('N'); dataFile.write('A');
-    } else {
-       dataFile.print((int)temp); // Print entier est plus léger que float
-    }
-    dataFile.write(',');
-    dataFile.print(lum);
-    dataFile.write('\r'); dataFile.write('\n');
-    dataFile.close();
-  }
-}
-
-// =====================================================
-// MODES DE FONCTIONNEMENT
-// =====================================================
+//---------------------------Fonctionnement------------------------
 
 void acquisition(bool avecLuminosite, bool avecAffichage, bool avecEnregistrement) {
   unsigned long m = millis();
@@ -563,9 +545,7 @@ void acquisition(bool avecLuminosite, bool avecAffichage, bool avecEnregistremen
   }
 }
 
-// =====================================================
-// SETUP & LOOP
-// =====================================================
+//--------------------------Setup et Look--------------------------
 
 void setup() {
   Serial.begin(9600);
