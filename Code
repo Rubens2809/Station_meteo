@@ -10,7 +10,7 @@
 #include <string.h>
 #include <avr/pgmspace.h>
 #include <SPI.h>
-#include <SdFat.h> // Utilisation de SdFat pour le support de rename()
+#include <SdFat.h> 
 
 //--------------------------Materiel------------------------
 
@@ -110,7 +110,7 @@ unsigned long derniereInteraction = 0;
 uint8_t counter_NA = 0;
 bool etatLED = false;
 DateTime now;
-uint8_t t_inactivite = 30;
+uint8_t t_inactivite = 10;
 char cmdBuffer[12];
 
 //--------------Eeprom------------------
@@ -272,7 +272,9 @@ bool parseDate(const char* s, uint8_t& month, uint8_t& day, uint16_t& year) {
     return (month >= 1 && month <= 12 && day >= 1 && day <= 31 && year >= 2000);
 }
 
-
+void resetInactivite() {
+    derniereInteraction = millis();
+}
 
 void lectureCommande() {
   if (!Serial.available()) return;
@@ -354,7 +356,7 @@ void affichage() {
     lcd.print((int)t);
     lcd.print("C ");
   } else {
-    lcd.print(F("NA"));
+    lcd.print(F("T:NA"));
   }
 
   if (h == h) {
@@ -362,7 +364,7 @@ void affichage() {
     lcd.print((int)h);
     lcd.print("%");
   } else {
-    lcd.print(F("H:NA"));
+    lcd.print(F(" H:NA"));
   }
 
   lcd.setCursor(0, 1);
@@ -403,9 +405,7 @@ void changement_modes() {
 
 }
 
-void resetInactivite() {
-    derniereInteraction = millis();
-}
+
 
 void verif_inactivite() {
   if (mode_actif == MODE_CONFIGURATION) {
@@ -456,36 +456,6 @@ void couleur_modes() {
   }
 }
 
-//---------------------Enregistrement---------------------------------
-
-void enregistrerDonnees(float temp, float hum, int lum, float lat, float lon) {
-  char filename[13];
-  construireNom(filename, 0);
-
-  if (!verifierRotationFichier(filename)) return;
-  File32 dataFile;
-
-  if (dataFile.open(filename, O_WRONLY | O_CREAT | O_AT_END)) {
-    dataFile.write((uint8_t)(now.day() / 10) + '0');
-    dataFile.write((uint8_t)(now.day() % 10) + '0');
-    dataFile.write('/');
-    dataFile.write((uint8_t)(now.month() / 10) + '0');
-    dataFile.write((uint8_t)(now.month() % 10) + '0');
-    dataFile.write(' ');
-   
-    dataFile.print("T:");
-    if (temp != temp) { 
-       dataFile.write('N'); dataFile.write('A');
-    } else {
-       dataFile.print((int)temp);
-    }
-    dataFile.print(", H:");
-    dataFile.print(lum);
-    dataFile.write('\r'); dataFile.write('\n');
-    dataFile.close();
-  }
-}
-
 //---------------------------Archivage------------------------------------
 
 void construireNom(char* buf, uint8_t r) {
@@ -522,6 +492,36 @@ bool verifierRotationFichier(const char* filename) {
     }
   }
   return true;
+}
+
+//---------------------Enregistrement---------------------------------
+
+void enregistrerDonnees(float temp, float hum, int lum, float lat, float lon) {
+  char filename[13];
+  construireNom(filename, 0);
+
+  if (!verifierRotationFichier(filename)) return;
+  File32 dataFile;
+
+  if (dataFile.open(filename, O_WRONLY | O_CREAT | O_AT_END)) {
+    dataFile.write((uint8_t)(now.day() / 10) + '0');
+    dataFile.write((uint8_t)(now.day() % 10) + '0');
+    dataFile.write('/');
+    dataFile.write((uint8_t)(now.month() / 10) + '0');
+    dataFile.write((uint8_t)(now.month() % 10) + '0');
+    dataFile.write(' ');
+   
+    dataFile.print("T:");
+    if (temp != temp) { 
+       dataFile.write('N'); dataFile.write('A');
+    } else {
+       dataFile.print((int)temp);
+    }
+    dataFile.print(", H:");
+    dataFile.print(lum);
+    dataFile.write('\r'); dataFile.write('\n');
+    dataFile.close();
+  }
 }
 
 //---------------------------Fonctionnement------------------------
@@ -563,7 +563,7 @@ void setup() {
   attachInterrupt(digitalPinToInterrupt(BTN_ROUGE), btn_rouge, CHANGE);
   attachInterrupt(digitalPinToInterrupt(BTN_VERT), btn_vert, CHANGE);
 
-  sd.begin(SD_CS, SPI_HALF_SPEED); // On ne teste plus le retour true/false
+  sd.begin(SD_CS, SPI_HALF_SPEED); 
 
   if (!rtc.isrunning()) rtc.adjust(DateTime(F(__DATE__), F(__TIME__)));
 
